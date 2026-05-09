@@ -5,6 +5,10 @@ description: >-
   extracted from git commit history. Analyzes commit records to produce quantified,
   value-focused project descriptions. Trigger on: "整理项目经验" "生成简历项目"
   "git 提交 简历" "项目经验整理" "resume from git" "project experience from commits"
+license: MIT
+metadata:
+  author: tanpenggood
+  version: "1.0"
 ---
 
 # Git Resume Builder
