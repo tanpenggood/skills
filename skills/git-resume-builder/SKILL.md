@@ -3,8 +3,8 @@ name: git-resume-builder
 description: >-
   Use when the user wants to generate or update their resume with project experience
   extracted from git commit history. Analyzes commit records to produce quantified,
-  value-focused project descriptions. Trigger on: "整理项目经验" "生成简历项目"
-  "git 提交 简历" "项目经验整理" "resume from git" "project experience from commits"
+  value-focused project descriptions. 
+trigger: "整理项目经验"、"生成简历项目"、"git 提交 简历"、"项目经验整理"、"resume from git"、"project experience from commits"等用户想从git提交记录整理项目经验或生成简历时触发
 license: MIT
 metadata:
   author: tanpenggood
