@@ -10,8 +10,12 @@ JetBrains 配置目录：
   Linux:   ~/.config/JetBrains/<IDE>/aia-task-history
 
 用法：
-  python export_aia_sessions.py --list
+  python export_aia_sessions.py --list                # 列出会话（含推断项目）
+  python export_aia_sessions.py --summary             # 按推断项目汇总
   python export_aia_sessions.py --session <GUID> [--ide-name IntelliJIdea2026.2] [--out-dir …]
+
+所属项目推断：.events 不含项目字段，但含文件路径（查看文件/改动/工具参数等）；
+与 IDE options/recentProjects.xml 里的已知项目根做最长前缀匹配得出。
 """
 
 import argparse
@@ -19,12 +23,20 @@ import base64
 import json
 import os
 import platform
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 DEFAULT_IDE = "IntelliJIdea2026.2"
 OUT_MD = "aia-session-{guid}.md"
 OUT_JSONL = "aia-session-{guid}.jsonl"
+
+PATH_KEYS = {
+    "files", "beforepath", "afterpath", "filepath", "parentdir", "workspace",
+    "cwd", "targetdir", "path", "dir", "directory", "outpath", "outputpath",
+    "destpath", "srcdir", "sourceroot",
+}
 
 
 def history_dir(ide_name: str) -> Path:
@@ -58,12 +70,112 @@ def load_events(events_path: Path) -> list:
     return events
 
 
-def render_md(guid: str, agent_raw: str, events: list) -> str:
+def load_projects(cfg: Path) -> list:
+    """从 IDE 的 options/recentProjects.xml 读取已知项目根目录（最长的在前）。"""
+    xml_path = cfg / "options" / "recentProjects.xml"
+    if not xml_path.exists():
+        return []
+    xml = xml_path.read_text(encoding="utf-8-sig", errors="ignore")
+    projects = set()
+    for m in re.finditer(r'<entry\s+key="([^"]+)"', xml):
+        key = m.group(1)
+        key = key.replace("$USER_HOME$", str(Path.home()))
+        key = key.replace("$APPLICATION_CONFIG_DIR$", str(cfg))
+        if "light-edit" in key.lower():
+            continue
+        key = key.replace("\\", "/").rstrip("/")
+        if key:
+            projects.add(key)
+    return sorted(projects, key=len, reverse=True)
+
+
+def infer_project(projects: list, events: list):
+    """从事件中的绝对路径推断会话所属项目。
+
+    返回 (project | None, 命中数, 参与匹配的路径数)。
+    事件不含项目字段；以 project 根为前缀的最长匹配作为项目归属。
+    """
+    if not projects:
+        return None, 0, 0
+    norm = [p.lower() for p in projects]
+    counts = Counter()
+    total = 0
+    candidates = []
+
+    def collect_paths(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(k, str) and k.lower() in PATH_KEYS and isinstance(v, str):
+                    candidates.append(v)
+                collect_paths(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect_paths(v)
+        elif isinstance(o, str):
+            if re.match(r"^[a-zA-Z]:[\\/]", o) or o.startswith("/"):
+                candidates.append(o)
+
+    for e in events:
+        collect_paths(e)
+    for s in candidates:
+        total += 1
+        ss = s.replace("\\", "/").lower()
+        for idx, p in enumerate(norm):
+            if ss == p or ss.startswith(p + "/"):
+                counts[idx] += 1
+                break
+    if counts:
+        idx, n = counts.most_common(1)[0]
+        return projects[idx], n, total
+    return None, 0, total
+
+
+def infer_project_all(projects: list, events: list) -> list:
+    """项目推断的"展开"版：返回所有命中过的项目及命中路径数，按命中数降序。
+
+    一个会话可能同时操作多个项目（或根/子项目都命中），默认只取最优，
+    用 --project-all 时按全部命中统计。
+    """
+    if not projects:
+        return []
+    norm = [p.lower() for p in projects]
+    counts = Counter()
+
+    def collect_paths(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(k, str) and k.lower() in PATH_KEYS and isinstance(v, str):
+                    s = v.replace("\\", "/").lower().rstrip("/")
+                    for idx, p in enumerate(norm):
+                        if s == p or s.startswith(p + "/"):
+                            counts[idx] += 1
+                            break
+                collect_paths(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect_paths(v)
+        elif isinstance(o, str):
+            if re.match(r"^[a-zA-Z]:[\\/]", o) or o.startswith("/"):
+                s = o.replace("\\", "/").lower().rstrip("/")
+                for idx, p in enumerate(norm):
+                    if s == p or s.startswith(p + "/"):
+                        counts[idx] += 1
+                        break
+
+    for e in events:
+        collect_paths(e)
+    return sorted(((projects[i], c) for i, c in counts.items()),
+                  key=lambda pc: (-pc[1], -len(pc[0])))
+
+
+def render_md(guid: str, agent_raw: str, events: list, project: str = None) -> str:
     out = []
     out.append(f"# AI Assistant 会话导出 {guid}")
     out.append("")
     out.append(f"底层代理: {agent_raw}")
     out.append(f"事件数: {len(events)}")
+    if project:
+        out.append(f"所属项目: {project}")
     out.append("")
 
     md_chunk = ""
@@ -160,30 +272,69 @@ def render_md(guid: str, agent_raw: str, events: list) -> str:
     return "\n".join(out)
 
 
-def cmd_list(hist: Path) -> int:
+def cmd_list(hist: Path, projects: list, project=None, unknown: bool = False) -> int:
     rows = []
     for ap in sorted(hist.glob("*.agentsession"), key=lambda p: p.stat().st_mtime, reverse=True):
         guid = ap.stem
         agent_raw = ap.read_text(encoding="utf-8").strip()
         ev = hist / f"{guid}.events"
         n = 0
+        proj = None
         if ev.exists():
             try:
-                n = len(load_events(ev))
+                evs = load_events(ev)
+                n = len(evs)
+                proj, _, _ = infer_project(projects, evs)
             except Exception:
                 n = -1
-        rows.append((ap.stat().st_mtime, guid, agent_raw.split(":", 1)[0], agent_raw, n))
+        if unknown and proj:
+            continue
+        if project and not (proj and project.lower() in proj.lower()):
+            continue
+        rows.append((ap.stat().st_mtime, guid, proj, agent_raw.split(":", 1)[0], agent_raw, n))
     if not rows:
-        print(f"({hist}) 下没有 .agentsession，换个 --ide-name 试试？")
+        print("无匹配会话。")
         return 0
     w = max(len(r[1]) for r in rows)
-    for _, guid, agent, agent_raw, n in rows:
-        print(f"{guid:<{w}}  {agent:<24}  events={n:>4}  {agent_raw}")
-    print(f"\n共 {len(rows)} 个 .agentsession（其中 .events 有事件记录的 {(sum(1 for r in rows if r[4] > 0))} 个）")
+    pw = max([len(r[2] or "(未知)") for r in rows] + [8])
+    for _, guid, proj, agent, agent_raw, n in rows:
+        projname = proj.rsplit("/", 1)[-1] if proj else "(未知)"
+        print(f"{guid:<{w}}  {projname:<{pw}}  {agent:<24}  events={n:>4}  {agent_raw}")
+    print(f"\n共 {len(rows)} 个 .agentsession（其中 .events 有事件记录的 {(sum(1 for r in rows if r[5] > 0))} 个），"
+          f"可识别项目 {(sum(1 for r in rows if r[2]))} 个")
     return 0
 
 
-def cmd_export(hist: Path, guid: str, out_dir: Path) -> int:
+def cmd_summary(hist: Path, projects: list, project_all: bool = False) -> int:
+    acc = Counter()
+    tot = Counter()
+    for ap in sorted(hist.glob("*.agentsession")):
+        guid = ap.stem
+        ev = hist / f"{guid}.events"
+        if not ev.exists():
+            continue
+        try:
+            evs = load_events(ev)
+            if project_all:
+                matches = infer_project_all(projects, evs)
+                for proj, n in matches:
+                    acc[proj] += 1
+                    tot[proj] += n
+                continue
+            proj, n, _ = infer_project(projects, evs)
+        except Exception:
+            continue
+        acc[proj] += 1
+        tot[proj] += n
+    suffix = "（--project-all：会话按命中的每个项目都计数，合计可超过会话数）" if project_all else ""
+    print(f"项目分布（按会话数倒序；共 {sum(acc.values())} 个有 .events 的会话）{suffix}:")
+    for p, n in acc.most_common():
+        name = p if p else "(未知项目 / 无文件路径可推断)"
+        print(f"{n:>4} 个会话  路径命中{tot[p]:>4}  {name}")
+    return 0
+
+
+def cmd_export(hist: Path, guid: str, out_dir: Path, projects: list) -> int:
     evp = hist / f"{guid}.events"
     if not evp.exists():
         print(f"不存在该会话的事件文件: {evp}", file=sys.stderr)
@@ -191,24 +342,33 @@ def cmd_export(hist: Path, guid: str, out_dir: Path) -> int:
     events = load_events(evp)
     asp = hist / f"{guid}.agentsession"
     agent_raw = asp.read_text(encoding="utf-8").strip() if asp.exists() else "(未知/无 .agentsession)"
+    proj, _, _ = infer_project(projects, events)
     out_dir.mkdir(parents=True, exist_ok=True)
     md_path = out_dir / OUT_MD.format(guid=guid)
     jsonl_path = out_dir / OUT_JSONL.format(guid=guid)
-    md_path.write_text(render_md(guid, agent_raw, events), encoding="utf-8")
+    md_path.write_text(render_md(guid, agent_raw, events, proj), encoding="utf-8")
     with jsonl_path.open("w", encoding="utf-8") as fh:
         for e in events:
             fh.write(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n")
     print(f"OK 可读对话: {md_path} ({md_path.stat().st_size} bytes)")
     print(f"OK 原始JSON: {jsonl_path} ({jsonl_path.stat().st_size} bytes)")
+    if proj:
+        print(f"所属项目: {proj}（由事件中的文件路径前缀匹配推断）")
+    else:
+        print("所属项目: 无法推断（事件中没有已知项目内的文件路径）")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出 JetBrains IDEA AI Assistant 会话")
-    ap.add_argument("--list", action="store_true", help="列出所有会话（不导出）")
+    ap.add_argument("--list", action="store_true", help="列出所有会话（含推断项目，不导出）")
+    ap.add_argument("--summary", action="store_true", help="按推断项目汇总会话数")
     ap.add_argument("--session", help="要导出的会话 GUID")
     ap.add_argument("--ide-name", default=DEFAULT_IDE, help=f"IDE 配置目录名，默认 {DEFAULT_IDE}")
     ap.add_argument("--out-dir", default=None, help="导出目录，默认系统 Downloads")
+    ap.add_argument("--project", default=None, help="与 --list 一起用：只列出该项目名/路径含该子串的会话")
+    ap.add_argument("--unknown", action="store_true", help="与 --list 一起用：只列出推断不出项目的会话")
+    ap.add_argument("--project-all", action="store_true", help="与 --summary 一起用：按命中的每个项目都计数（可跨项目）")
     args = ap.parse_args()
 
     hist = history_dir(args.ide_name)
@@ -219,13 +379,17 @@ def main() -> int:
             print(f"  {p.name}", file=sys.stderr)
         return 1
 
+    projects = load_projects(hist.parent) if (args.list or args.summary or args.session) else []
+
     if args.list:
-        return cmd_list(hist)
+        return cmd_list(hist, projects, args.project, args.unknown)
+    if args.summary:
+        return cmd_summary(hist, projects, args.project_all)
     if not args.session:
         print("请指定 --session <GUID>，或用 --list 查看现有会话", file=sys.stderr)
         return 2
     out_dir = Path(args.out_dir) if args.out_dir else default_out_dir()
-    return cmd_export(hist, args.session, out_dir)
+    return cmd_export(hist, args.session, out_dir, projects)
 
 
 if __name__ == "__main__":

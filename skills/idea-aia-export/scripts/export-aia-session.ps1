@@ -44,23 +44,88 @@ if (-not (Test-Path -LiteralPath $history)) {
     throw "找不到 aia-task-history: $history`n请确认 IDE 名（当前 $IdeName），可用 Get-ChildItem `"$env:APPDATA\JetBrains`" 查看"
 }
 
+$Script:PathKeys = @('files','beforePath','afterPath','filepath','parentDir','workspace','cwd','targetDir','path','dir','directory','outPath','outputPath','destPath','srcDir','sourceRoot')
+
+function Get-Projects {
+    param([string]$IdeConfigDir)
+    $xmlPath = Join-Path $IdeConfigDir 'options\recentProjects.xml'
+    if (-not (Test-Path -LiteralPath $xmlPath)) { return @() }
+    $xml = Get-Content -LiteralPath $xmlPath -Raw -Encoding UTF8
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($m in [regex]::Matches($xml, '<entry\s+key="([^"]+)"')) {
+        $key = $m.Groups[1].Value.Replace('$USER_HOME$', $env:USERPROFILE).Replace('$APPLICATION_CONFIG_DIR$', $IdeConfigDir)
+        if ($key -match 'light-edit') { continue }
+        $key = ($key -replace '\\', '/').TrimEnd('/')
+        if ($key) { [void]$set.Add($key) }
+    }
+    return @($set | Sort-Object { $_.Length } -Descending)
+}
+
+function Get-DecodedEvents {
+    param([string]$eventsPath)
+    $lines = Get-Content -LiteralPath $eventsPath
+    if ($lines[0] -ne 'AUI_EVENTS_V1') { throw "意外的文件头: $($lines[0])" }
+    $events = @()
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $b = $lines[$i].Trim()
+        if ($b -eq '') { continue }
+        $events += [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) | ConvertFrom-Json
+    }
+    return ,$events
+}
+
+function Get-SessionProject {
+    param([object[]]$projects, [object[]]$events)
+    if (-not $projects -or $projects.Count -eq 0) { return $null }
+    $cands = New-Object 'System.Collections.Generic.List[string]'
+    function Add-Candidates {
+        param($o)
+        if ($null -eq $o) { return }
+        if ($o -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($p in $o.PSObject.Properties) {
+                $v = $p.Value
+                if ($v -is [string]) {
+                    if ($p.Name -in $Script:PathKeys -or $v -match '^[a-zA-Z]:[\\/]' -or $v.StartsWith('/')) { $cands.Add($v) }
+                } else {
+                    Add-Candidates $v
+                }
+            }
+        } elseif ($o -is [System.Collections.IEnumerable]) {
+            foreach ($v in $o) { Add-Candidates $v }
+        }
+    }
+    foreach ($e in $events) { Add-Candidates $e }
+    foreach ($c in $cands) {
+        $ss = (($c -replace '\\', '/') -as [string]).ToLower().TrimEnd('/')
+        foreach ($p in $projects) {
+            $pp = $p.ToLower().TrimEnd('/')
+            if ($ss -eq $pp -or $ss.StartsWith($pp + '/')) { return $p }
+        }
+    }
+    return $null
+}
+
+$projects = Get-Projects (Join-Path $env:APPDATA "JetBrains\$IdeName")
+
 if ($List) {
     $rows = Get-ChildItem -LiteralPath $history -File -Filter *.agentsession |
         Sort-Object LastWriteTime -Descending |
         ForEach-Object {
             $guid = $_.BaseName
             $agentRaw = (Get-Content -LiteralPath $_.FullName -Raw).Trim()
-            $events = Test-Path -LiteralPath (Join-Path $history "$guid.events")
+            $evp = Join-Path $history "$guid.events"
+            $count = if (Test-Path -LiteralPath $evp) { (Get-Content -LiteralPath $evp | Measure-Object -Line).Lines - 1 } else { 0 }
             [PSCustomObject]@{
                 GUID       = $guid
                 Agent      = ($agentRaw -split ':')[0]
                 AgentSesID = $agentRaw
-                Events     = if ($events) { (Get-Content -LiteralPath (Join-Path $history "$guid.events") | Measure-Object -Line).Lines - 1 } else { 0 }
+                Events     = $count
                 Updated    = $_.LastWriteTime
             }
         }
     $rows | Format-Table -AutoSize -Wrap
     Write-Output "共 $($rows.Count) 个 .agentsession（其中 .events 有事件记录的 $(($rows | Where-Object { $_.Events -gt 0 }).Count) 个）"
+    Write-Output "提示：项目归属推断请用导出脚本（单个会话）或 python 版 export_aia_sessions.py --list/--summary（全量秒出）。"
     return
 }
 
@@ -73,6 +138,20 @@ if (-not (Test-Path -LiteralPath $eventsPath)) {
     throw "不存在该会话的事件文件: $eventsPath`n试试 -List 确认 GUID"
 }
 
+$rawLines = Get-Content -LiteralPath $eventsPath
+if ($rawLines[0] -ne 'AUI_EVENTS_V1') { throw "意外的文件头: $($rawLines[0])" }
+
+$events = @()
+$jsonl = New-Object System.Collections.Generic.List[string]
+for ($i = 1; $i -lt $rawLines.Count; $i++) {
+    $b = $rawLines[$i].Trim()
+    if ($b -eq '') { continue }
+    $txt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))
+    $jsonl.Add($txt)
+    $events += ($txt | ConvertFrom-Json)
+}
+$project = Get-SessionProject $projects $events
+
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $OutDir = Join-Path $env:USERPROFILE 'Downloads'
 }
@@ -83,25 +162,19 @@ if (-not (Test-Path -LiteralPath $OutDir)) {
 $agentSesPath = Join-Path $history "$SessionId.agentsession"
 $agentRaw = if (Test-Path -LiteralPath $agentSesPath) { (Get-Content -LiteralPath $agentSesPath -Raw).Trim() } else { '(未知/无 .agentsession)' }
 
-$lines = Get-Content -LiteralPath $eventsPath
-if ($lines[0] -ne 'AUI_EVENTS_V1') { throw "意外的文件头: $($lines[0])" }
-
-$decoded = for ($i = 1; $i -lt $lines.Count; $i++) {
-    $base64 = $lines[$i].Trim()
-    if ($base64 -eq '') { continue }
-    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($base64))
-}
-
 $outJsonl = Join-Path $OutDir "aia-session-$SessionId.jsonl"
 $outMd    = Join-Path $OutDir "aia-session-$SessionId.md"
 
-$decoded | Set-Content -Encoding UTF8 $outJsonl
+$jsonl | Set-Content -Encoding UTF8 $outJsonl
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("# AI Assistant 会话导出 $SessionId")
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine("底层代理: $agentRaw")
-[void]$sb.AppendLine("事件数: $($decoded.Count)")
+[void]$sb.AppendLine("事件数: $($events.Count)")
+if ($project) {
+    [void]$sb.AppendLine("所属项目: $project")
+}
 [void]$sb.AppendLine('')
 
 $mdChunk = ''
@@ -119,8 +192,7 @@ function FlushMd {
     $script:mdStep = $null
 }
 
-foreach ($jsonline in $decoded) {
-    $e = $jsonline | ConvertFrom-Json
+foreach ($e in $events) {
     switch ($e.type) {
         'com.intellij.ml.llm.chat.shared.ChatSessionUserPromptEvent' {
             FlushMd -text $mdChunk -step $mdStep
@@ -211,3 +283,8 @@ $sb.ToString() | Set-Content -Encoding UTF8 $outMd
 
 Write-Output "OK 可读对话: $outMd ($((Get-Item -LiteralPath $outMd).Length) bytes)"
 Write-Output "OK 原始JSON: $outJsonl ($((Get-Item -LiteralPath $outJsonl).Length) bytes)"
+if ($project) {
+    Write-Output "所属项目: $project（由事件中的文件路径前缀匹配推断）"
+} else {
+    Write-Output "所属项目: 无法推断（事件中没有已知项目内的文件路径）"
+}
