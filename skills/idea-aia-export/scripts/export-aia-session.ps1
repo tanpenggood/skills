@@ -45,6 +45,7 @@ if (-not (Test-Path -LiteralPath $history)) {
 }
 
 $Script:PathKeys = @('files','beforePath','afterPath','filepath','parentDir','workspace','cwd','targetDir','path','dir','directory','outPath','outputPath','destPath','srcDir','sourceRoot')
+$Script:RelCache = @{}
 
 function Get-Projects {
     param([string]$IdeConfigDir)
@@ -74,18 +75,39 @@ function Get-DecodedEvents {
     return ,$events
 }
 
+function Get-RelativeRoot {
+    param([object[]]$projects, [string]$rel)
+    $s = ($rel -replace '\\', '/').Trim()
+    while ($s.StartsWith('./')) { $s = $s.Substring(2) }
+    $s = $s.TrimEnd('/')
+    if (-not $s -or $s -eq '.' -or $s -eq '..' -or $s.StartsWith('/') -or $s.Split('/')[0].Contains(':')) { return -1 }
+    if ($Script:RelCache.Contains($s)) { return [int]$Script:RelCache[$s] }
+    $hits = @()
+    for ($i = 0; $i -lt $projects.Count; $i++) {
+        if (Test-Path -LiteralPath (Join-Path $projects[$i] $s)) { $hits += $i }
+    }
+    $idx = if ($hits.Count -eq 1) { [int]$hits[0] } else { -1 }
+    $Script:RelCache[$s] = $idx
+    return $idx
+}
+
 function Get-SessionProject {
     param([object[]]$projects, [object[]]$events)
     if (-not $projects -or $projects.Count -eq 0) { return $null }
-    $cands = New-Object 'System.Collections.Generic.List[string]'
+    $cands = New-Object 'System.Collections.Generic.List[object]'
     function Add-Candidates {
         param($o)
         if ($null -eq $o) { return }
+        if ($o -is [string]) {
+            if ($o -match '^[a-zA-Z]:[\\/]' -or $o.StartsWith('/')) { $cands.Add(@{ v = $o; keyed = $false }) }
+            return
+        }
         if ($o -is [System.Management.Automation.PSCustomObject]) {
             foreach ($p in $o.PSObject.Properties) {
                 $v = $p.Value
                 if ($v -is [string]) {
-                    if ($p.Name -in $Script:PathKeys -or $v -match '^[a-zA-Z]:[\\/]' -or $v.StartsWith('/')) { $cands.Add($v) }
+                    if ($p.Name -in $Script:PathKeys) { $cands.Add(@{ v = $v; keyed = $true }) }
+                    elseif ($v -match '^[a-zA-Z]:[\\/]' -or $v.StartsWith('/')) { $cands.Add(@{ v = $v; keyed = $false }) }
                 } else {
                     Add-Candidates $v
                 }
@@ -95,14 +117,32 @@ function Get-SessionProject {
         }
     }
     foreach ($e in $events) { Add-Candidates $e }
+    $votes = @{}
+    $order = New-Object 'System.Collections.Generic.List[int]'
     foreach ($c in $cands) {
-        $ss = (($c -replace '\\', '/') -as [string]).ToLower().TrimEnd('/')
-        foreach ($p in $projects) {
-            $pp = $p.ToLower().TrimEnd('/')
-            if ($ss -eq $pp -or $ss.StartsWith($pp + '/')) { return $p }
+        $ss = (($c.v -replace '\\', '/') -as [string]).ToLower().TrimEnd('/')
+        $hit = $false
+        for ($i = 0; $i -lt $projects.Count; $i++) {
+            $pp = $projects[$i].ToLower().TrimEnd('/')
+            if ($ss -eq $pp -or $ss.StartsWith($pp + '/')) {
+                if (-not $votes.Contains($i)) { $order.Add($i) }
+                $votes[$i] = [int]$votes[$i] + 2; $hit = $true; break
+            }
+        }
+        if (-not $hit -and $c.keyed) {
+            $r = Get-RelativeRoot $projects $c.v
+            if ($r -ge 0) {
+                if (-not $votes.Contains($r)) { $order.Add($r) }
+                $votes[$r] = [int]$votes[$r] + 1
+            }
         }
     }
-    return $null
+    if ($votes.Count -eq 0) { return $null }
+    $best = $null; $bestN = 0
+    foreach ($k in $order) {
+        if ($null -eq $best -or [int]$votes[$k] -gt $bestN) { $best = $k; $bestN = [int]$votes[$k] }
+    }
+    return $projects[[int]$best]
 }
 
 $projects = Get-Projects (Join-Path $env:APPDATA "JetBrains\$IdeName")

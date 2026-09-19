@@ -53,7 +53,7 @@ python scripts/export_aia_sessions.py --list
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\export-aia-session.ps1 -List
 ```
 
-输出：GUID、Agent、底层会话 ID、事件数（倒序）。`--list` 有多列时还会显示 **项目** 列（读 IDE 的 `options\recentProjects.xml` 与事件中的文件路径最长前缀匹配推断）。Python 用 `--ide-name`、PS 用 `-IdeName` 切换 IDE（默认均为 `IntelliJIdea2026.2`）。
+输出：GUID、Agent、底层会话 ID、事件数（倒序）。`--list` 有多列时还会显示 **项目** 列（读 IDE 的 `options\recentProjects.xml`，与事件中的文件路径匹配推断：绝对路径最长前缀匹配；相对路径按唯一存在性归属）。Python 用 `--ide-name`、PS 用 `-IdeName` 切换 IDE（默认均为 `IntelliJIdea2026.2`）。
 
 ### 2. 导出指定会话
 
@@ -74,7 +74,10 @@ PS 版同样：`-SessionId <GUID>`、`-OutDir`。PS 导出也会在 md 头部加
 
 ### 3. 按项目区分会话
 
-事件里只含文件路径、没有项目字段，靠读 IDE `options\recentProjects.xml`（50 个项目根，最长前缀匹配事件中的绝对路径）来推断归属：
+事件里只含文件路径、没有项目字段，靠读 IDE `options\recentProjects.xml`（50 个项目根）推断归属：
+
+- **绝对路径**：与项目根做最长前缀匹配（每票权重 2）。
+- **相对路径**：ACP 类 Agent（qoder-cli、opencode 等）的事件里只有相对项目根的路径（如 `01-requirements\xxx\prd.md`），按"在且仅在一个已知项目根下存在"归属（每票权重 1；存在于多个根下视为无区分度，不投票）。按会话计票，票多者胜。
 
 ```bash
 # 按项目统计会话数（推荐看这个分布）
@@ -85,7 +88,7 @@ python scripts/export_aia_sessions.py --list [--project 项目名子串] [--unkn
 ```
 
 - `--summary` 输出每项目会话数/匹配事件数；`--unknown` 只列推断不出的会话，`--project <子串>` 过滤某项目，`--project-all` 改为按命中的每个项目都计数（一个会话可计入多个项目，合计可超过会话数）。
-- 说明：只统计有 `.events` 的会话；未命中 = 事件里没有已知项目内的文件路径（约一半到七成会话无法推断，属正常，很多 Agent 的对话框操纵/纯聊天/重命名弹窗不会带项目内路径）。
+- 说明：只统计有 `.events` 的会话；未命中 = 事件里没有已知项目内的文件路径（约七成会话无法推断，属正常，很多 Agent 的对话框操纵/纯聊天/重命名弹窗不会带项目内路径；相对路径对应的文件若已删除也无法命中）。
 - 导出的 md 头部同样有 `所属项目:` 行；PS 的 `-List` 为轻量快跑模式**不**推断项目（全量区分请用 Python `--list`/`--summary`）。
 
 ### 4. 按底层会话 ID 找 GUID

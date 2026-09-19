@@ -15,7 +15,8 @@ JetBrains 配置目录：
   python export_aia_sessions.py --session <GUID> [--ide-name IntelliJIdea2026.2] [--out-dir …]
 
 所属项目推断：.events 不含项目字段，但含文件路径（查看文件/改动/工具参数等）；
-与 IDE options/recentProjects.xml 里的已知项目根做最长前缀匹配得出。
+绝对路径与 IDE options/recentProjects.xml 里的已知项目根做最长前缀匹配得出；
+部分代理（ACP 等）只记相对项目根的路径，再按"在且仅在一个已知根下存在"归属。
 """
 
 import argparse
@@ -37,6 +38,34 @@ PATH_KEYS = {
     "cwd", "targetdir", "path", "dir", "directory", "outpath", "outputpath",
     "destpath", "srcdir", "sourceroot",
 }
+
+_REL_ROOT_CACHE = {}
+
+
+def _norm_relative(s: str):
+    """把候选串规整为项目根相对路径；不是相对路径（绝对/带盘符/空）则返回 None。"""
+    s = s.replace("\\", "/").strip()
+    while s.startswith("./"):
+        s = s[2:]
+    s = s.rstrip("/")
+    if not s or s in (".", "..") or s.startswith("/") or ":" in s.split("/")[0]:
+        return None
+    return s
+
+
+def _match_relative(projects: list, rel: str):
+    """相对路径（ACP 等代理只记项目根相对路径）归属：在且仅在一个已知项目根下存在时返回该根下标。
+
+    存在于多个根下说明无区分度，返回 None，避免把票投给错误项目。
+    """
+    s = _norm_relative(rel)
+    if s is None:
+        return None
+    if s not in _REL_ROOT_CACHE:
+        hits = [i for i, p in enumerate(projects) if os.path.exists(os.path.join(p, s))]
+        _REL_ROOT_CACHE[s] = hits[0] if len(hits) == 1 else -1
+    idx = _REL_ROOT_CACHE[s]
+    return idx if idx >= 0 else None
 
 
 def history_dir(ide_name: str) -> Path:
@@ -90,10 +119,11 @@ def load_projects(cfg: Path) -> list:
 
 
 def infer_project(projects: list, events: list):
-    """从事件中的绝对路径推断会话所属项目。
+    """从事件中的路径推断会话所属项目。
 
     返回 (project | None, 命中数, 参与匹配的路径数)。
-    事件不含项目字段；以 project 根为前缀的最长匹配作为项目归属。
+    事件不含项目字段；绝对路径以 project 根为前缀的最长匹配作为项目归属；
+    相对路径（部分代理只记相对项目根的路径）按在已知根下的唯一存在性归属。
     """
     if not projects:
         return None, 0, 0
@@ -105,25 +135,34 @@ def infer_project(projects: list, events: list):
     def collect_paths(o):
         if isinstance(o, dict):
             for k, v in o.items():
-                if isinstance(k, str) and k.lower() in PATH_KEYS and isinstance(v, str):
-                    candidates.append(v)
-                collect_paths(v)
+                if isinstance(v, str):
+                    if isinstance(k, str) and k.lower() in PATH_KEYS:
+                        candidates.append((v, True))
+                    elif re.match(r"^[a-zA-Z]:[\\/]", v) or v.startswith("/"):
+                        candidates.append((v, False))
+                else:
+                    collect_paths(v)
         elif isinstance(o, list):
             for v in o:
                 collect_paths(v)
         elif isinstance(o, str):
             if re.match(r"^[a-zA-Z]:[\\/]", o) or o.startswith("/"):
-                candidates.append(o)
+                candidates.append((o, False))
 
     for e in events:
         collect_paths(e)
-    for s in candidates:
+    for s, keyed in candidates:
         total += 1
         ss = s.replace("\\", "/").lower()
         for idx, p in enumerate(norm):
             if ss == p or ss.startswith(p + "/"):
-                counts[idx] += 1
+                counts[idx] += 2
                 break
+        else:
+            if keyed:
+                idx = _match_relative(projects, s)
+                if idx is not None:
+                    counts[idx] += 1
     if counts:
         idx, n = counts.most_common(1)[0]
         return projects[idx], n, total
@@ -144,13 +183,22 @@ def infer_project_all(projects: list, events: list) -> list:
     def collect_paths(o):
         if isinstance(o, dict):
             for k, v in o.items():
-                if isinstance(k, str) and k.lower() in PATH_KEYS and isinstance(v, str):
+                if isinstance(v, str):
+                    keyed = isinstance(k, str) and k.lower() in PATH_KEYS
+                    if not keyed and not (re.match(r"^[a-zA-Z]:[\\/]", v) or v.startswith("/")):
+                        continue
                     s = v.replace("\\", "/").lower().rstrip("/")
                     for idx, p in enumerate(norm):
                         if s == p or s.startswith(p + "/"):
-                            counts[idx] += 1
+                            counts[idx] += 2
                             break
-                collect_paths(v)
+                    else:
+                        if keyed:
+                            idx = _match_relative(projects, v)
+                            if idx is not None:
+                                counts[idx] += 1
+                else:
+                    collect_paths(v)
         elif isinstance(o, list):
             for v in o:
                 collect_paths(v)
@@ -159,7 +207,7 @@ def infer_project_all(projects: list, events: list) -> list:
                 s = o.replace("\\", "/").lower().rstrip("/")
                 for idx, p in enumerate(norm):
                     if s == p or s.startswith(p + "/"):
-                        counts[idx] += 1
+                        counts[idx] += 2
                         break
 
     for e in events:
