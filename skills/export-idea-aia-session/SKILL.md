@@ -1,5 +1,5 @@
 ---
-name: idea-aia-export
+name: export-idea-aia-session
 description: 导出 JetBrains IDEA AI Assistant 中各种 Agent（opencode/qoder/codex/claude-acp/codebuddy 等）的会话记录。数据源位于 %APPDATA%\JetBrains\<IDE名>\aia-task-history\，每个会话一组的 .events（AUI_EVENTS_V1，每行一条 base64 的 JSON 事件）、.agentsession（底层会话ID）、.lastid 文件。Use when 用户说导出/备份 IDEA AI Assistant 会话、AI Agent 对话、解析 .events 文件、把 aia-task-history 里的对话导出为 Markdown/JSON、按 GUID 或底层 ses_ 会话 ID 导出。
 ---
 
