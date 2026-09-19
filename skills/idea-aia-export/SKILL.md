@@ -36,36 +36,45 @@ IDE 名按版本变化：`IntelliJIdea2026.2`、`IntelliJIdea2026.1`、`PyCharm2
 
 ## 快速使用
 
-脚本：`scripts/export-aia-session.ps1`（Windows PowerShell 5.1，无第三方依赖）
+两种实现（输出文件完全一致）：
+
+| 脚本 | 跨平台 | 依赖 |
+|------|--------|------|
+| `scripts/export_aia_sessions.py`（**推荐**） | Windows / macOS / Linux | Python 3 标准库，无第三方依赖。自动按 OS 定位 JetBrains 配置目录 |
+| `scripts/export-aia-session.ps1` | 仅 Windows | PowerShell 5.1。**文件必须保存为 UTF-8 带 BOM**（无 BOM 时中文会乱码），已有 BOM 勿再改存 |
 
 ### 1. 列出所有会话
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File <此skill目录>\scripts\export-aia-session.ps1 -List
+```bash
+# Python（推荐，跨平台）
+python scripts/export_aia_sessions.py --list
+
+# Windows PowerShell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\export-aia-session.ps1 -List
 ```
 
-输出：GUID、Agent、底层会话 ID、事件数、更新时间（按时间倒序）。可用 `-IdeName` 切换 IDE（默认 `IntelliJIdea2026.2`）。
+输出：GUID、Agent、底层会话 ID、事件数（倒序）。Python 用 `--ide-name`、PS 用 `-IdeName` 切换 IDE（默认均为 `IntelliJIdea2026.2`）。
 
 ### 2. 导出指定会话
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File <此skill目录>\scripts\export-aia-session.ps1 -SessionId <GUID>
+```bash
+python scripts/export_aia_sessions.py --session <GUID> [--out-dir D:\backup]
 ```
 
-默认导出到 `%USERPROFILE%\Downloads`（用 `-OutDir` 指定其他目录），按 `<GUID>` 产出固定命名的 2 个文件：
+默认导出到系统 `Downloads`（可用 `--out-dir` 指定其他目录），按 `<GUID>` 产出固定命名的 2 个文件：
 
 | 默认文件名 | 格式 | 内容 |
 |------|------|------|
 | `aia-session-<GUID>.jsonl` | JSON Lines | 原始解码事件，每行一条完整 JSON（含未被 md 截断的工具全文） |
 | `aia-session-<GUID>.md` | Markdown | 可读对话：每轮 = `## 用户` → `### 思考` → `### 工具 / 终端命令 / 查看文件` → `### AI`（markdown 流式分块已按 stepId 合并为完整回复） |
 
-例：`SessionId=c2011737-ffca-4bb0-beb3-cd2c7414a42f` → `Downloads\aia-session-c2011737-ffca-4bb0-beb3-cd2c7414a42f.jsonl` 与 `...md`。
+例：`--session c2011737-ffca-4bb0-beb3-cd2c7414a42f` → `Downloads\aia-session-c2011737-ffca-4bb0-beb3-cd2c7414a42f.jsonl` 与 `...md`。
+
+PS 版同样：`-SessionId <GUID>`、`-OutDir`。
 
 ### 3. 按底层会话 ID 找 GUID
 
-```powershell
-Get-ChildItem <aia-task-history> -Filter *.agentsession | Where-Object { (Get-Content $_ -Raw) -match 'ses_xxxx' }
-```
+见常见问题一节的反查命令（Python / PowerShell 均可）。
 
 ## 事件类型说明（解码 `.events` 时用）
 
@@ -83,7 +92,15 @@ md 导出对超长内容有截断保护（工具 output 2500 字符、args 1200 
 
 ### 找不到我想导出的那个会话？
 
-用 `-List` 看更新时间倒序列表，或用 `.agentsession` 里的 `ses_` 底层 ID 反查。DATA 在 `Get-ChildItem "$env:APPDATA\JetBrains\IntelliJIdea2026.2\aia-task-history" -Filter *.events | Sort-Object LastWriteTime -Descending` 最顶部。
+用 `--list`（PS 版 `-List`）看倒序列表，或用 `.agentsession` 里的 `ses_` 底层 ID 反查：
+
+```bash
+# Python
+python scripts/export_aia_sessions.py --list
+
+# PowerShell 反查（例：按 ses_xxx 找 GUID）
+Get-ChildItem <aia-task-history> -Filter *.agentsession | Where-Object { (Get-Content $_ -Raw) -match 'ses_xxx' }
+```
 
 ### 普通 AI Assistant 聊天（不启动 Agent）的会话在这吗？
 

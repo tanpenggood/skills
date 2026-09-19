@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     导出 JetBrains IDEA AI Assistant 会话（aia-task-history 下的 .events 文件）。
 
