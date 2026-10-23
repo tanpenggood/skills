@@ -290,8 +290,10 @@ def main():
     host = args[0]
     port = int(args[1])
     cookie = args[2]
+    default_dir = os.path.join(os.getcwd(), "outputs")
+    os.makedirs(default_dir, exist_ok=True)
     output_path = args[3] if len(args) > 3 else os.path.join(
-        os.getcwd(), f"禅道数据看板_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        default_dir, f"禅道数据看板_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     )
 
     # Step 1: Doing projects

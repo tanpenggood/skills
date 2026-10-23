@@ -35,7 +35,7 @@ python <skill_dir>\scripts\zentao_dashboard.py <host> <port> "<cookie>" [输出�
 python "<skill_dir>\scripts\zentao_dashboard.py" 127.0.0.1 10086 "lang=zh-cn; za=admin; zentaosid=xxx..." "C:\Users\<用户名>\Desktop\禅道数据看板.xlsx"
 ```
 
-不指定输出路径则自动生成到当前目录，文件名含时间戳。
+不指定输出路径则自动生成到当前项目的 `outputs/` 目录下，文件名格式为 `禅道数据看板_yyyyMMdd_HHmm.xlsx`。
 
 ### 3. 输出文件结构
 
